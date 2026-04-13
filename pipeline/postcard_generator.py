@@ -1,33 +1,49 @@
 """
-Postcard generator — creates a 6x9 glossy postcard with:
-  - AI-rendered aerial pool image
-  - Property address + economics callouts
-  - Personalized QR code linking to microsite
-  - Contractor branding
+Postcard generator — 6x9 glossy BEFORE/AFTER layout.
 
-Output: JPEG suitable for Lob's 6x9 postcard spec (1875x1275 at 300dpi).
+Left half:  satellite aerial photo  (BEFORE)
+Right half: AI-rendered pool photo  (AFTER)
+Bottom bar: address · build cost · value lift · QR code · contractor
+
+Output: JPEG at 1875x1275 (300 dpi) for Lob's 6x9 spec.
 """
 import os
 import asyncio
+import logging
 import qrcode
 from PIL import Image, ImageDraw, ImageFont
 import io
-
 import config
 
-# Postcard size: 6x9 inches at 300 DPI
-POSTCARD_W = 1875  # 6.25" x 300
-POSTCARD_H = 1275  # 4.25" x 300
+logger = logging.getLogger(__name__)
+
+# Canvas: 6x9 inches @ 300 dpi
+W, H = 1875, 1275
+HALF = W // 2          # 937
+BAR_H = 220
+IMG_H = H - BAR_H      # 1055
+
+C_GREEN  = (34, 139, 34)
+C_WHITE  = (255, 255, 255)
+C_BLACK  = (20, 20, 20)
+C_GRAY   = (120, 120, 120)
+C_PANEL  = (245, 245, 240)
+C_BADGE_BEFORE = (60, 60, 60, 210)
+C_BADGE_AFTER  = (34, 139, 34, 210)
 
 
 def _load_font(size: int, bold: bool = False):
-    """Load a font, falling back to PIL default if not available."""
-    try:
-        if bold:
-            return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", size)
-        return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", size)
-    except Exception:
-        return ImageFont.load_default()
+    for path in [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold else
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    ]:
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            pass
+    return ImageFont.load_default()
 
 
 async def generate_postcard(
@@ -36,111 +52,95 @@ async def generate_postcard(
     city: str,
     state: str,
     rendered_image_path: str,
-    pool_cost: float,
-    value_lift: float,
-    microsite_url: str,
+    satellite_image_path: str = "",
+    pool_cost: float = 0,
+    value_lift: float = 0,
+    microsite_url: str = "",
     contractor_name: str = "Premier Pool & Spa",
     contractor_phone: str = "(813) 555-0190",
 ) -> str:
-    """Generate a postcard image. Returns local file path."""
-    await asyncio.sleep(0.3)
-
     out_path = os.path.join(config.IMAGES_DIR, f"{prospect_id}_postcard.jpg")
+    await asyncio.sleep(0)
 
-    card = Image.new("RGB", (POSTCARD_W, POSTCARD_H), (255, 255, 255))
-    draw = ImageDraw.Draw(card)
+    canvas = Image.new("RGB", (W, H), C_WHITE)
+    draw = ImageDraw.Draw(canvas, "RGBA")
 
-    # ── Left panel: rendered aerial image (60% width) ──────────────────────
-    panel_w = int(POSTCARD_W * 0.62)
+    # Left panel: satellite (BEFORE)
     try:
-        aerial = Image.open(rendered_image_path).convert("RGB")
-        aerial = aerial.resize((panel_w, POSTCARD_H), Image.LANCZOS)
-        card.paste(aerial, (0, 0))
+        sat = Image.open(satellite_image_path).convert("RGB").resize((HALF, IMG_H), Image.LANCZOS)
     except Exception:
-        draw.rectangle([0, 0, panel_w, POSTCARD_H], fill=(30, 80, 50))
+        sat = Image.new("RGB", (HALF, IMG_H), (80, 80, 80))
+    canvas.paste(sat, (0, 0))
 
-    # Gradient overlay on left panel for text legibility
-    overlay = Image.new("RGBA", (panel_w, POSTCARD_H), (0, 0, 0, 0))
-    overlay_draw = ImageDraw.Draw(overlay)
-    for y in range(POSTCARD_H // 2, POSTCARD_H):
-        alpha = int(180 * (y - POSTCARD_H // 2) / (POSTCARD_H // 2))
-        overlay_draw.line([(0, y), (panel_w, y)], fill=(0, 0, 0, alpha))
-    card.paste(overlay, (0, 0), mask=overlay.split()[3])
-
-    # Address overlay on image
+    # Right panel: rendered pool (AFTER)
     try:
-        card_alpha = card.convert("RGBA")
-        ov = Image.new("RGBA", card.size, (0, 0, 0, 0))
-        ov_draw = ImageDraw.Draw(ov)
-        for y in range(POSTCARD_H - 220, POSTCARD_H):
-            alpha = int(160 * (y - (POSTCARD_H - 220)) / 220)
-            ov_draw.line([(0, y), (panel_w, y)], fill=(0, 0, 0, alpha))
-        card = Image.alpha_composite(card_alpha, ov).convert("RGB")
-        draw = ImageDraw.Draw(card)
+        ren = Image.open(rendered_image_path).convert("RGB").resize((HALF, IMG_H), Image.LANCZOS)
     except Exception:
-        pass
+        ren = Image.new("RGB", (HALF, IMG_H), (30, 100, 180))
+    canvas.paste(ren, (HALF, 0))
 
-    font_addr = _load_font(38, bold=True)
-    font_sub = _load_font(28)
-    draw.text((30, POSTCARD_H - 190), address, font=font_addr, fill=(255, 255, 255))
-    draw.text((30, POSTCARD_H - 140), f"{city}, {state}", font=font_sub, fill=(220, 220, 220))
+    # Centre divider
+    draw.rectangle([(HALF - 3, 0), (HALF + 3, IMG_H)], fill=C_WHITE)
 
-    # ── Right panel: offer + QR ─────────────────────────────────────────────
-    rx = panel_w + 20
-    rw = POSTCARD_W - panel_w - 40
+    # BEFORE / AFTER badges
+    badge_font = _load_font(38, bold=True)
+    for label, bx, color in [("BEFORE", 28, C_BADGE_BEFORE), ("AFTER", HALF + 28, C_BADGE_AFTER)]:
+        bbox = draw.textbbox((0, 0), label, font=badge_font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        pad = 14
+        draw.rounded_rectangle(
+            [(bx - pad, 28 - pad), (bx + tw + pad, 28 + th + pad)],
+            radius=8, fill=color,
+        )
+        draw.text((bx, 28), label, font=badge_font, fill=C_WHITE)
 
-    # Header
-    font_headline = _load_font(52, bold=True)
-    font_body = _load_font(32)
-    font_small = _load_font(26)
-    font_cta = _load_font(36, bold=True)
-    font_price = _load_font(56, bold=True)
-    font_label = _load_font(24)
+    # Bottom info bar
+    bar_y = IMG_H
+    draw.rectangle([(0, bar_y), (W, H)], fill=C_PANEL)
+    draw.rectangle([(0, bar_y), (W, bar_y + 6)], fill=C_GREEN)
 
-    # Brand accent bar
-    draw.rectangle([panel_w, 0, POSTCARD_W, 8], fill=(0, 160, 100))
+    addr_font  = _load_font(36, bold=True)
+    city_font  = _load_font(28)
+    label_font = _load_font(24)
+    num_font   = _load_font(44, bold=True)
+    small_font = _load_font(22)
+    ctr_font   = _load_font(30, bold=True)
 
-    # Headline
-    draw.text((rx, 40), "Your home is", font=font_body, fill=(80, 80, 80))
-    draw.text((rx, 80), "pool-ready.", font=font_headline, fill=(0, 140, 80))
+    addr_x, addr_y = 40, bar_y + 22
+    draw.text((addr_x, addr_y), address, font=addr_font, fill=C_BLACK)
+    draw.text((addr_x, addr_y + 44), f"{city}, {state}  ·  Pool ready", font=city_font, fill=C_GRAY)
 
-    # Divider
-    draw.line([(rx, 158), (POSTCARD_W - 20, 158)], fill=(220, 220, 220), width=2)
+    col1_x = 40
+    col2_x = 360
+    num_y  = addr_y + 100
+    draw.text((col1_x, num_y), f"${int(pool_cost):,}", font=num_font, fill=C_GREEN)
+    draw.text((col1_x, num_y + 52), "Estimated build cost", font=label_font, fill=C_GRAY)
+    draw.text((col2_x, num_y), f"+${int(value_lift):,}", font=num_font, fill=C_BLACK)
+    draw.text((col2_x, num_y + 52), "Projected value lift", font=label_font, fill=C_GRAY)
 
-    # Economics
-    draw.text((rx, 175), "ESTIMATED BUILD COST", font=font_label, fill=(120, 120, 120))
-    draw.text((rx, 205), f"${pool_cost:,.0f}", font=font_price, fill=(30, 30, 30))
-
-    draw.text((rx, 290), "PROJECTED VALUE LIFT", font=font_label, fill=(120, 120, 120))
-    draw.text((rx, 320), f"+${value_lift:,.0f}", font=font_price, fill=(0, 140, 80))
-
-    draw.line([(rx, 405), (POSTCARD_W - 20, 405)], fill=(220, 220, 220), width=2)
-
-    # CTA
-    draw.text((rx, 425), "See your pool →", font=font_cta, fill=(0, 100, 200))
-    draw.text((rx, 470), "Scan to view your", font=font_small, fill=(100, 100, 100))
-    draw.text((rx, 498), "personalized render", font=font_small, fill=(100, 100, 100))
+    ctr_x = W - 520
+    draw.text((ctr_x, addr_y + 10), contractor_name, font=ctr_font, fill=C_BLACK)
+    draw.text((ctr_x, addr_y + 48), contractor_phone, font=city_font, fill=C_GRAY)
+    draw.text((ctr_x, addr_y + 82), "Free consultation · No obligation", font=small_font, fill=C_GRAY)
 
     # QR code
-    qr = qrcode.QRCode(version=2, box_size=6, border=2)
-    qr.add_data(f"http://{config.BASE_URL}/properties/{microsite_url}")
+    qr_url = f"https://{microsite_url}" if not microsite_url.startswith("http") else microsite_url
+    qr = qrcode.QRCode(version=1, box_size=4, border=2)
+    qr.add_data(qr_url)
     qr.make(fit=True)
     qr_img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
-    qr_size = 220
-    qr_img = qr_img.resize((qr_size, qr_size), Image.NEAREST)
-    qr_x = rx
-    qr_y = 540
-    card.paste(qr_img, (qr_x, qr_y))
+    qr_size = 160
+    qr_img = qr_img.resize((qr_size, qr_size), Image.LANCZOS)
+    qr_x = W - qr_size - 30
+    qr_y = bar_y + (BAR_H - qr_size) // 2
+    canvas.paste(qr_img, (qr_x, qr_y))
+    draw.text((qr_x + 8, qr_y + qr_size + 4), "Scan to see your pool", font=small_font, fill=C_GRAY)
 
-    # Contractor info
-    draw.line([(rx, 790), (POSTCARD_W - 20, 790)], fill=(220, 220, 220), width=1)
-    draw.text((rx, 808), contractor_name, font=_load_font(30, bold=True), fill=(40, 40, 40))
-    draw.text((rx, 848), contractor_phone, font=font_small, fill=(80, 80, 80))
-    draw.text((rx, 880), "Free consultation • No obligation", font=font_small, fill=(120, 120, 120))
+    # Legal footer
+    legal = f"{contractor_name} · Licensed & Insured · FL #CPC1234567"
+    legal_font = _load_font(18)
+    draw.text((HALF - 200, H - 22), legal, font=legal_font, fill=C_GRAY)
 
-    # License bar
-    draw.rectangle([0, POSTCARD_H - 35, POSTCARD_W, POSTCARD_H], fill=(245, 245, 245))
-    draw.text((20, POSTCARD_H - 28), "Premier Pool & Spa · Licensed & Insured · FL #CPC1234567", font=_load_font(18), fill=(160, 160, 160))
-
-    card.save(out_path, "JPEG", quality=95, dpi=(300, 300))
+    canvas.save(out_path, "JPEG", quality=92)
+    logger.info(f"Postcard saved: {out_path}")
     return out_path
