@@ -86,32 +86,27 @@ async def _replicate_construction_video(image_path: str) -> list:
     import replicate
 
     prompt = (
-        "Aerial drone time-lapse footage filmed from a fixed 45-degree angle approximately 150 feet "
-        "above a residential backyard on a bright sunny Florida afternoon. The scene begins with a "
-        "flat green grass lawn in the backyard with a freshly marked rectangular outline on the ground "
-        "where the pool will be built. A compact excavator moves in and digs a clean rectangular pit "
-        "approximately 15 feet wide by 32 feet long, removing dark brown clay earth and piling displaced "
-        "soil to one side. The excavated pit has sharply defined vertical walls and a flat bottom. "
-        "Construction workers spray gunite concrete along the walls and floor, forming a smooth white-gray "
-        "concrete shell. A steel rebar grid is visible inside the shell before concrete is fully applied. "
-        "Light gray concrete pool deck slabs are poured and smoothed around all four sides of the pool. "
-        "White concrete coping tiles are laid along the top perimeter edge of the pool. "
-        "Crystal-clear water begins filling from the bottom, slowly rising — first showing shallow aqua "
-        "at the base, then building to half-full with shimmering light turquoise, then completely filled "
-        "with bright cerulean blue water sparkling in the sunlight. The finished pool has vivid turquoise "
-        "blue water with a gentle shimmer, clean white coping around all edges, two white lounge chairs "
-        "placed on the pool deck beside the water. The surrounding property features a single-story home "
-        "with terracotta red tile roof sections and a flat white roof wing, lush tropical Florida "
-        "landscaping including tall palm trees and mature oak canopy along the property border, neatly "
-        "trimmed green hedges, and bright green Bermuda grass lawn. Photorealistic 4K aerial drone "
-        "footage, sharp focus, cinematic color grading, golden afternoon sunlight casting soft shadows."
+        "Continue animating this exact aerial image. Do not change the house, the roof, the trees, "
+        "the lawn, the fences, or any part of the existing property shown in the image. "
+        "Keep every element of the scene identical to the input image — only add and animate a swimming "
+        "pool being constructed in the backyard area of this specific property. "
+        "Time-lapse construction sequence building on top of this image: a rectangular pit is excavated "
+        "in the backyard, revealing dark brown clay soil with sharply defined edges. A compact excavator "
+        "removes earth and piles displaced soil to one side. Construction workers spray white-gray gunite "
+        "concrete along the pit walls and floor forming a clean pool shell, with a steel rebar grid "
+        "briefly visible before concrete sets. Light gray concrete deck slabs form around all four sides. "
+        "White coping tiles are placed along the perimeter edge. Crystal-clear water slowly rises from "
+        "the bottom — first shallow aqua at the base, then bright turquoise halfway, then full cerulean "
+        "blue sparkling water catching sunlight. Two white lounge chairs appear on the finished pool deck. "
+        "The final frame shows this exact same property with a completed luxury rectangular swimming pool "
+        "seamlessly integrated into the backyard, as if it was always there."
     )
     negative_prompt = (
-        "cartoon, illustration, blur, watermark, text overlay, CGI, unrealistic, low quality, "
-        "glitch, distortion, overexposed, flat colors, amateur, fisheye, wide angle distortion, "
-        "indoor, night, rain, winter, snow, dead grass, ugly, deformed pool shape"
+        "different house, different property, different location, new scene, new background, "
+        "change the house, move the trees, alter the landscape, replace the roof, "
+        "cartoon, illustration, blur, watermark, text overlay, CGI look, unrealistic, "
+        "low quality, glitch, distortion, overexposed, night, rain, snow, dead grass, deformed pool"
     )
-
     logger.info("Calling Replicate Wan 2.1 for construction video...")
     with open(image_path, "rb") as img_file:
         output = await asyncio.to_thread(
