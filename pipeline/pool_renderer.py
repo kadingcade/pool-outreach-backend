@@ -344,10 +344,13 @@ async def create_reveal_gif(satellite_path: str, rendered_path: str, prospect_id
                 shimmer_off += 4
             add(frame_arr, 80)
 
-    # ── Stage 5: Hard cut to AI render ───────────────────────────────────────
-    if rendered:
+    # ── Stage 5: Hold on last construction frame ────────────────────────────
+    # Hold on whatever the last frame is (final Replicate video frame or PIL water stage)
+    # This is the most realistic "completed pool" view we have
+    if frames:
+        last_frame = frames[-1]
         for _ in range(8):
-            add(rendered, 400)
+            add(last_frame, 400)
 
     if not frames:
         return ""
