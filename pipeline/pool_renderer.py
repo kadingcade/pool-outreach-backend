@@ -52,16 +52,21 @@ async def render_pool(prospect_id: str, satellite_path: str, pool_zone: dict) ->
 
     if not use_real:
         await _demo_render(satellite_path, out_path, pool_zone)
-    elif provider == "fal" and config.FAL_API_KEY:
-        await _fal_render(satellite_path, out_path, pool_zone)
-    elif provider == "openai" and config.OPENAI_API_KEY:
-        await _openai_render(satellite_path, out_path, pool_zone)
-    elif provider == "stability" and config.STABILITY_API_KEY:
-        await _stability_render(satellite_path, out_path, pool_zone)
-    elif config.REPLICATE_API_TOKEN:
-        await _replicate_render(satellite_path, out_path, pool_zone)
     else:
-        await _demo_render(satellite_path, out_path, pool_zone)
+        try:
+            if provider == "fal" and config.FAL_API_KEY:
+                await _fal_render(satellite_path, out_path, pool_zone)
+            elif provider == "openai" and config.OPENAI_API_KEY:
+                await _openai_render(satellite_path, out_path, pool_zone)
+            elif provider == "stability" and config.STABILITY_API_KEY:
+                await _stability_render(satellite_path, out_path, pool_zone)
+            elif config.REPLICATE_API_TOKEN:
+                await _replicate_render(satellite_path, out_path, pool_zone)
+            else:
+                await _demo_render(satellite_path, out_path, pool_zone)
+        except Exception as e:
+            logger.warning(f"AI render failed ({e}), falling back to demo render")
+            await _demo_render(satellite_path, out_path, pool_zone)
 
     return out_path
 
