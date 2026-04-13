@@ -76,18 +76,95 @@ def _make_concrete_patch(w, h, rng):
     return patch
 
 
-def create_reveal_gif(satellite_path: str, rendered_path: str, prospect_id: str, pool_zone: dict = None) -> str:
+async def _replicate_construction_video(image_path: str) -> list:
     """
-    Cinematic pool construction time-lapse GIF:
-      1. Aerial overview hold
-      2. Drone zoom into pool zone (Ken Burns)
-      3. Camera tilt to 45-degree perspective via QUAD warp
-      4. Realistic excavation (dirt texture + soil pile)
-      5. Concrete shell + rebar grid
-      6. Water rising with shimmer
-      7. Hard cut to actual AI-rendered pool on real property
+    Call Replicate Wan 2.1 image-to-video with a construction prompt.
+    Returns a list of PIL RGB frames extracted from the output video.
+    Falls back to empty list on any failure.
     """
-    import os
+    import glob
+    import replicate
+
+    prompt = (
+        "aerial drone time lapse of swimming pool construction in residential backyard, "
+        "excavation with machinery, dirt removal, concrete shell poured, rebar grid visible, "
+        "blue water slowly filling the pool, realistic construction process, cinematic"
+    )
+    negative_prompt = "cartoon, blur, watermark, text, unrealistic, low quality, glitch"
+
+    logger.info("Calling Replicate Wan 2.1 for construction video...")
+    with open(image_path, "rb") as img_file:
+        output = await asyncio.to_thread(
+            replicate.run,
+            "wavespeedai/wan-2.1-i2v-480p",
+            input={
+                "image": img_file,
+                "prompt": prompt,
+                "negative_prompt": negative_prompt,
+                "num_frames": 81,
+                "guidance_scale": 7.5,
+                "num_inference_steps": 30,
+            },
+        )
+
+    # output may be a URL string or FileOutput object
+    video_url = str(output) if not hasattr(output, "url") else output.url
+    logger.info(f"Replicate video URL: {video_url}")
+
+    # Download video
+    async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+        resp = await client.get(video_url)
+        video_bytes = resp.content
+
+    if len(video_bytes) < 5000:
+        logger.warning("Replicate video too small, skipping")
+        return []
+
+    # Write to temp file and extract frames at 10fps scaled to 800x600
+    frames = []
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+        tmp.write(video_bytes)
+        tmp_path = tmp.name
+
+    try:
+        with tempfile.TemporaryDirectory() as frame_dir:
+            result = subprocess.run(
+                [
+                    "ffmpeg", "-y", "-i", tmp_path,
+                    "-vf", "fps=10,scale=800:600:force_original_aspect_ratio=decrease,"
+                           "pad=800:600:(ow-iw)/2:(oh-ih)/2:black",
+                    "-q:v", "2",
+                    os.path.join(frame_dir, "frame_%04d.jpg"),
+                ],
+                capture_output=True, timeout=60,
+            )
+            if result.returncode == 0:
+                frame_files = sorted(glob.glob(os.path.join(frame_dir, "frame_*.jpg")))
+                frames = [Image.open(f).convert("RGB") for f in frame_files]
+                logger.info(f"Extracted {len(frames)} frames from Replicate video")
+            else:
+                logger.warning(f"ffmpeg frame extraction failed: {result.stderr.decode()[:200]}")
+    except Exception as e:
+        logger.warning(f"Frame extraction error: {e}")
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+    return frames
+
+
+async def create_reveal_gif(satellite_path: str, rendered_path: str, prospect_id: str, pool_zone: dict = None) -> str:
+    """
+    Cinematic pool construction GIF:
+      1. Aerial overview hold (PIL)
+      2. Drone zoom into pool zone - Ken Burns (PIL)
+      3. Camera tilt to 45-degree perspective - QUAD warp (PIL)
+      4. AI construction video - Replicate Wan 2.1 image-to-video
+         (falls back to PIL dirt/concrete/water stages if Replicate unavailable)
+      5. Hard cut to actual AI-rendered pool on the real property
+    """
     GIF_W, GIF_H = 800, 600
 
     out_path = satellite_path.replace("_satellite.jpg", "_reveal.gif")
@@ -97,15 +174,12 @@ def create_reveal_gif(satellite_path: str, rendered_path: str, prospect_id: str,
 
     rng = np.random.default_rng(42)
 
-    # Load base images
     sat = Image.open(satellite_path).convert("RGB").resize((GIF_W, GIF_H), Image.LANCZOS)
-    sat_arr = np.array(sat)
 
     rendered = None
     if rendered_path and os.path.exists(rendered_path):
         rendered = Image.open(rendered_path).convert("RGB").resize((GIF_W, GIF_H), Image.LANCZOS)
 
-    # Scale pool zone from 640x480 to GIF size
     sx, sy = GIF_W / 640, GIF_H / 480
     if pool_zone:
         px1 = int(pool_zone["x1"] * sx)
@@ -126,240 +200,154 @@ def create_reveal_gif(satellite_path: str, rendered_path: str, prospect_id: str,
         frames.append(img.copy() if isinstance(img, Image.Image) else Image.fromarray(img))
         durations.append(ms)
 
-    # ── Stage 1: Aerial overview hold (6 frames × 200ms) ──────────────────────
+    # ── Stage 1: Aerial overview hold ────────────────────────────────────────
     for _ in range(6):
         add(sat, 200)
 
-    # ── Stage 2: Drone zoom into pool zone (14 frames) ────────────────────────
-    # Ken Burns: crop from full image down to ~2× pool zone padding
+    # ── Stage 2: Drone zoom (Ken Burns) ──────────────────────────────────────
     pad = max(pool_w, pool_h) * 1.4
-    crop_start = (0, 0, GIF_W, GIF_H)  # full image
     crop_end = (
-        max(0, cx - pad),
-        max(0, cy - pad),
-        min(GIF_W, cx + pad),
-        min(GIF_H, cy + pad),
+        max(0, cx - pad), max(0, cy - pad),
+        min(GIF_W, cx + pad), min(GIF_H, cy + pad),
     )
     n_zoom = 14
     for i in range(n_zoom):
-        t = i / (n_zoom - 1)
-        t = t * t  # ease-in
-        x0 = crop_start[0] + t * (crop_end[0] - crop_start[0])
-        y0 = crop_start[1] + t * (crop_end[1] - crop_start[1])
-        x1c = crop_start[2] + t * (crop_end[2] - crop_start[2])
-        y1c = crop_start[3] + t * (crop_end[3] - crop_start[3])
+        t = (i / (n_zoom - 1)) ** 2
+        x0 = t * crop_end[0]
+        y0 = t * crop_end[1]
+        x1c = GIF_W + t * (crop_end[2] - GIF_W)
+        y1c = GIF_H + t * (crop_end[3] - GIF_H)
         cropped = sat.crop((x0, y0, x1c, y1c)).resize((GIF_W, GIF_H), Image.LANCZOS)
         add(cropped, 60)
 
-    # Zoomed base used for tilt stages
     zoomed = sat.crop(crop_end).resize((GIF_W, GIF_H), Image.LANCZOS)
 
-    # ── Stage 3: Camera tilt to 45° via QUAD warp (12 frames) ─────────────────
-    # QUAD maps a source quadrilateral → fills destination rectangle.
-    # Progressively inset the top edge to simulate camera tilting forward.
+    # ── Stage 3: Camera tilt to 45° (QUAD warp) ──────────────────────────────
     n_tilt = 12
     max_inset = int(GIF_W * 0.22)
     for i in range(n_tilt):
-        t = i / (n_tilt - 1)
-        t = t ** 0.6  # ease-out
+        t = (i / (n_tilt - 1)) ** 0.6
         inset = int(t * max_inset)
-        # Source quad corners (top inset = perspective tilt)
-        quad_data = [
-            inset,         0,
-            GIF_W - inset, 0,
-            GIF_W,         GIF_H,
-            0,             GIF_H,
-        ]
+        quad_data = [inset, 0, GIF_W - inset, 0, GIF_W, GIF_H, 0, GIF_H]
         tilted = zoomed.transform((GIF_W, GIF_H), Image.QUAD, quad_data, Image.BILINEAR)
         add(tilted, 70)
 
-    # Final tilted base frame (all construction stages rendered on this)
-    final_tilt_inset = max_inset
-    quad_final = [final_tilt_inset, 0, GIF_W - final_tilt_inset, 0, GIF_W, GIF_H, 0, GIF_H]
+    # Final tilted base frame — used as Replicate input
+    quad_final = [max_inset, 0, GIF_W - max_inset, 0, GIF_W, GIF_H, 0, GIF_H]
     tilted_base = zoomed.transform((GIF_W, GIF_H), Image.QUAD, quad_final, Image.BILINEAR)
-    tilted_arr = np.array(tilted_base)
 
-    # Recalculate pool zone coords in the tilted view
-    # The tilt compresses top and keeps bottom: approximate new coords
-    def tilt_y(y_orig):
-        # map original y in zoomed image → tilted y
-        # At top (y=0): pixels move inward. At bottom (y=H): unchanged.
-        # Approximate inverse: compressed coord
-        ratio = y_orig / GIF_H
-        new_x_scale = 1 - (1 - ratio) * (final_tilt_inset * 2 / GIF_W)
-        return y_orig, new_x_scale
+    # ── Stage 4: AI construction video via Replicate ─────────────────────────
+    construction_frames = []
+    replicate_token = os.environ.get("REPLICATE_API_TOKEN", "")
+    if replicate_token and not config.DEMO_MODE:
+        try:
+            # Save tilted frame as input for Replicate
+            tilted_input_path = satellite_path.replace("_satellite.jpg", "_tilted_input.jpg")
+            tilted_base.save(tilted_input_path, "JPEG", quality=92)
+            construction_frames = await _replicate_construction_video(tilted_input_path)
+            try:
+                os.unlink(tilted_input_path)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.warning(f"Replicate construction video failed ({e}), using PIL fallback")
+            construction_frames = []
 
-    # Pool zone in tilted view (approximate)
-    tilt_ratio_top = 1 - (1 - py1 / GIF_H) * (final_tilt_inset * 2 / GIF_W)
-    tilt_ratio_bot = 1 - (1 - py2 / GIF_H) * (final_tilt_inset * 2 / GIF_W)
-    tp_x1 = int(GIF_W / 2 - (pool_w / 2) * tilt_ratio_top)
-    tp_x2 = int(GIF_W / 2 + (pool_w / 2) * tilt_ratio_top)
-    tp_y1 = py1
-    tp_x1b = int(GIF_W / 2 - (pool_w / 2) * tilt_ratio_bot)
-    tp_x2b = int(GIF_W / 2 + (pool_w / 2) * tilt_ratio_bot)
-    tp_y2 = py2
+    if construction_frames:
+        # Use Replicate frames directly
+        for frame in construction_frames:
+            add(frame, 100)
+    else:
+        # ── PIL fallback: dirt → concrete → rebar → water ─────────────────
+        tilted_arr = np.array(tilted_base)
 
-    # ── Stage 4: Excavation — dirt texture fills pool zone (14 frames) ─────────
-    dirt = _make_dirt_patch(pool_w, pool_h, rng)
-    n_dig = 14
-    for i in range(n_dig):
-        t = (i + 1) / n_dig
-        frame_arr = tilted_arr.copy()
-        # Fill pool zone progressively top-to-bottom with dirt
-        fill_rows = int(pool_h * t)
-        if fill_rows > 0:
-            # Interpolate x bounds for trapezoidal pool zone in tilted view
+        tilt_ratio_top = 1 - (1 - py1 / GIF_H) * (max_inset * 2 / GIF_W)
+        tilt_ratio_bot = 1 - (1 - py2 / GIF_H) * (max_inset * 2 / GIF_W)
+        tp_x1 = int(GIF_W / 2 - (pool_w / 2) * tilt_ratio_top)
+        tp_x2 = int(GIF_W / 2 + (pool_w / 2) * tilt_ratio_top)
+        tp_x1b = int(GIF_W / 2 - (pool_w / 2) * tilt_ratio_bot)
+        tp_x2b = int(GIF_W / 2 + (pool_w / 2) * tilt_ratio_bot)
+        tp_y1, tp_y2 = py1, py2
+
+        dirt = _make_dirt_patch(pool_w, pool_h, rng)
+        concrete = _make_concrete_patch(pool_w, pool_h, rng)
+
+        # Excavation
+        for i in range(12):
+            t = (i + 1) / 12
+            frame_arr = tilted_arr.copy()
+            fill_rows = int(pool_h * t)
             for row in range(fill_rows):
-                row_t = row / pool_h
-                x_left = int(tp_x1 + (tp_x1b - tp_x1) * row_t)
-                x_right = int(tp_x2 + (tp_x2b - tp_x2) * row_t)
-                y_row = tp_y1 + row
-                if 0 <= y_row < GIF_H and x_left < x_right:
-                    w_row = x_right - x_left
-                    d_slice = dirt[row, :min(w_row, pool_w)]
-                    if len(d_slice) < w_row:
-                        d_slice = np.resize(d_slice, (w_row, 3))
-                    frame_arr[y_row, x_left:x_right] = d_slice[:w_row]
+                rt = row / pool_h
+                xl = int(tp_x1 + (tp_x1b - tp_x1) * rt)
+                xr = int(tp_x2 + (tp_x2b - tp_x2) * rt)
+                yr = tp_y1 + row
+                if 0 <= yr < GIF_H and xl < xr:
+                    frame_arr[yr, xl:xr] = np.resize(dirt[row, :pool_w], (xr - xl, 3))
+            add(frame_arr, 90)
 
-        # Soil pile — mounded dirt to upper-right of pool
-        pile_cx = min(GIF_W - 10, tp_x2 + 20)
-        pile_cy = max(10, tp_y1 - 15)
-        pile_r = int(pool_w * 0.18)
-        for dy in range(-pile_r, pile_r + 1):
-            for dx in range(-pile_r, pile_r + 1):
-                dist = (dx ** 2 + dy ** 2) ** 0.5
-                if dist < pile_r * t:
-                    py_p = pile_cy + dy
-                    px_p = pile_cx + dx
-                    if 0 <= py_p < GIF_H and 0 <= px_p < GIF_W:
-                        factor = 1 - dist / pile_r
-                        earth = np.array([120 + int(20 * factor), 82 + int(15 * factor), 45], dtype=np.uint8)
-                        frame_arr[py_p, px_p] = earth
-
-        add(frame_arr, 90)
-
-    # ── Stage 5: Concrete shell + rebar grid (10 frames) ──────────────────────
-    concrete = _make_concrete_patch(pool_w, pool_h, rng)
-    n_concrete = 10
-    for i in range(n_concrete):
-        t = (i + 1) / n_concrete
-        frame_arr = tilted_arr.copy()
-        # Full dirt first
-        for row in range(pool_h):
-            row_t = row / pool_h
-            x_left = int(tp_x1 + (tp_x1b - tp_x1) * row_t)
-            x_right = int(tp_x2 + (tp_x2b - tp_x2) * row_t)
-            y_row = tp_y1 + row
-            if 0 <= y_row < GIF_H and x_left < x_right:
-                w_row = x_right - x_left
-                d_slice = np.resize(dirt[row, :pool_w], (w_row, 3))
-                frame_arr[y_row, x_left:x_right] = d_slice
-        # Concrete walls build inward from edges
-        wall = max(2, int(pool_w * 0.10 * t))
-        for row in range(pool_h):
-            row_t = row / pool_h
-            x_left = int(tp_x1 + (tp_x1b - tp_x1) * row_t)
-            x_right = int(tp_x2 + (tp_x2b - tp_x2) * row_t)
-            y_row = tp_y1 + row
-            if 0 <= y_row < GIF_H:
-                # Left wall
-                xl_end = min(GIF_W, x_left + wall)
-                if xl_end > x_left:
-                    w_s = xl_end - x_left
-                    frame_arr[y_row, x_left:xl_end] = concrete[row, :w_s]
-                # Right wall
-                xr_start = max(0, x_right - wall)
-                if xr_start < x_right:
-                    w_s = x_right - xr_start
-                    frame_arr[y_row, xr_start:x_right] = concrete[row, pool_w - w_s:pool_w]
-        # Top / bottom walls
-        for col_row in range(min(wall, pool_h)):
-            row_t_top = col_row / pool_h
-            row_t_bot = (pool_h - 1 - col_row) / pool_h
-            for is_bot, row_t in [(False, row_t_top), (True, row_t_bot)]:
-                y_row = tp_y1 + (pool_h - 1 - col_row if is_bot else col_row)
-                x_left = int(tp_x1 + (tp_x1b - tp_x1) * row_t)
-                x_right = int(tp_x2 + (tp_x2b - tp_x2) * row_t)
-                if 0 <= y_row < GIF_H and x_left < x_right:
-                    w_row = x_right - x_left
-                    frame_arr[y_row, x_left:x_right] = np.resize(concrete[col_row, :pool_w], (w_row, 3))
-        # Rebar grid overlay (visible at >50% progress)
-        if t > 0.5:
-            rebar_color = np.array([40, 35, 30], dtype=np.uint8)
-            spacing = max(8, pool_h // 8)
-            for row in range(pool_h):
-                row_t = row / pool_h
-                x_left = int(tp_x1 + (tp_x1b - tp_x1) * row_t)
-                x_right = int(tp_x2 + (tp_x2b - tp_x2) * row_t)
-                y_row = tp_y1 + row
-                if 0 <= y_row < GIF_H and row % spacing == 0:
-                    for px_r in range(max(0, x_left + wall), min(GIF_W, x_right - wall)):
-                        frame_arr[y_row, px_r] = rebar_color
-            spacing_c = max(8, pool_w // 8)
-            for col_off in range(0, pool_w, spacing_c):
-                for row in range(pool_h):
-                    row_t = row / pool_h
-                    x_left = int(tp_x1 + (tp_x1b - tp_x1) * row_t)
-                    px_r = x_left + wall + int(col_off * (x_right - x_left - 2 * wall) / pool_w)
-                    y_row = tp_y1 + row
-                    if 0 <= y_row < GIF_H and 0 <= px_r < GIF_W:
-                        frame_arr[y_row, px_r] = rebar_color
-        add(frame_arr, 90)
-
-    # ── Stage 6: Water rises (16 frames) ──────────────────────────────────────
-    n_water = 16
-    shimmer_offset = 0
-    for i in range(n_water):
-        t = (i + 1) / n_water
-        frame_arr = tilted_arr.copy()
+        # Concrete + rebar
         wall = max(2, int(pool_w * 0.10))
-        # Draw full concrete shell first
-        for row in range(pool_h):
-            row_t = row / pool_h
-            x_left = int(tp_x1 + (tp_x1b - tp_x1) * row_t)
-            x_right = int(tp_x2 + (tp_x2b - tp_x2) * row_t)
-            y_row = tp_y1 + row
-            if 0 <= y_row < GIF_H and x_left < x_right:
-                w_row = x_right - x_left
-                frame_arr[y_row, x_left:x_right] = np.resize(concrete[row, :pool_w], (w_row, 3))
-        # Water fills from bottom
-        water_rows = int(pool_h * t)
-        water_start_row = pool_h - water_rows
-        for row in range(water_start_row, pool_h):
-            row_t = row / pool_h
-            x_left = int(tp_x1 + (tp_x1b - tp_x1) * row_t) + wall
-            x_right = int(tp_x2 + (tp_x2b - tp_x2) * row_t) - wall
-            y_row = tp_y1 + row
-            if 0 <= y_row < GIF_H and x_left < x_right:
-                depth = (row - water_start_row) / max(1, water_rows)
-                # Deep blue at bottom, lighter cyan at surface
-                r = int(0 + depth * 10)
-                g = int(80 + depth * 50)
-                b = int(180 + depth * 40)
-                water_color = np.array([r, g, b], dtype=np.uint8)
-                frame_arr[y_row, x_left:x_right] = water_color
-        # Shimmer line at water surface
-        surface_row = tp_y1 + water_start_row
-        if 0 <= surface_row < GIF_H:
-            row_t = water_start_row / pool_h
-            x_left = int(tp_x1 + (tp_x1b - tp_x1) * row_t) + wall
-            x_right = int(tp_x2 + (tp_x2b - tp_x2) * row_t) - wall
-            shimmer_col = np.array([200, 230, 255], dtype=np.uint8)
-            for sx in range(x_left + shimmer_offset % 12, x_right, 20):
-                for sw in range(min(8, x_right - sx)):
-                    if 0 <= sx + sw < GIF_W:
-                        frame_arr[surface_row, sx + sw] = shimmer_col
-            shimmer_offset += 4
-        add(frame_arr, 80)
+        rebar_color = np.array([40, 35, 30], dtype=np.uint8)
+        for i in range(10):
+            t = (i + 1) / 10
+            frame_arr = tilted_arr.copy()
+            for row in range(pool_h):
+                rt = row / pool_h
+                xl = int(tp_x1 + (tp_x1b - tp_x1) * rt)
+                xr = int(tp_x2 + (tp_x2b - tp_x2) * rt)
+                yr = tp_y1 + row
+                if 0 <= yr < GIF_H and xl < xr:
+                    frame_arr[yr, xl:xr] = np.resize(dirt[row, :pool_w], (xr - xl, 3))
+                    w_t = max(0, int(wall * t))
+                    if w_t:
+                        frame_arr[yr, xl:min(GIF_W, xl + w_t)] = np.resize(concrete[row, :w_t], (min(w_t, xr - xl), 3))
+                        frame_arr[yr, max(0, xr - w_t):xr] = np.resize(concrete[row, :w_t], (min(w_t, xr - xl), 3))
+            if t > 0.5:
+                spacing = max(8, pool_h // 8)
+                for row in range(pool_h):
+                    rt = row / pool_h
+                    xl = int(tp_x1 + (tp_x1b - tp_x1) * rt) + wall
+                    xr = int(tp_x2 + (tp_x2b - tp_x2) * rt) - wall
+                    yr = tp_y1 + row
+                    if row % spacing == 0 and 0 <= yr < GIF_H and xl < xr:
+                        frame_arr[yr, xl:xr] = rebar_color
+            add(frame_arr, 90)
 
-    # ── Stage 7: Hard cut to AI render (hold 8 frames × 400ms) ───────────────
+        # Water fill
+        shimmer_off = 0
+        for i in range(14):
+            t = (i + 1) / 14
+            frame_arr = tilted_arr.copy()
+            water_start = int(pool_h * (1 - t))
+            for row in range(pool_h):
+                rt = row / pool_h
+                xl = int(tp_x1 + (tp_x1b - tp_x1) * rt) + wall
+                xr = int(tp_x2 + (tp_x2b - tp_x2) * rt) - wall
+                yr = tp_y1 + row
+                if 0 <= yr < GIF_H and xl < xr:
+                    frame_arr[yr, xl:xr] = np.resize(concrete[row, :pool_w], (xr - xl, 3))
+                    if row >= water_start:
+                        depth = (row - water_start) / max(1, pool_h - water_start)
+                        wc = np.array([int(depth * 10), int(80 + depth * 50), int(180 + depth * 40)], dtype=np.uint8)
+                        frame_arr[yr, xl:xr] = wc
+            if tp_y1 + water_start < GIF_H:
+                yr_s = tp_y1 + water_start
+                rt = water_start / pool_h
+                xl = int(tp_x1 + (tp_x1b - tp_x1) * rt) + wall
+                xr = int(tp_x2 + (tp_x2b - tp_x2) * rt) - wall
+                shimmer = np.array([200, 230, 255], dtype=np.uint8)
+                for sx in range(xl + shimmer_off % 12, xr, 20):
+                    for sw in range(min(8, xr - sx)):
+                        if 0 <= sx + sw < GIF_W:
+                            frame_arr[yr_s, sx + sw] = shimmer
+                shimmer_off += 4
+            add(frame_arr, 80)
+
+    # ── Stage 5: Hard cut to AI render ───────────────────────────────────────
     if rendered:
         for _ in range(8):
             add(rendered, 400)
-    else:
-        # If no AI render, hold on completed pool state
-        for _ in range(4):
-            add(Image.fromarray(frame_arr), 400)
 
     if not frames:
         return ""
@@ -373,7 +361,7 @@ def create_reveal_gif(satellite_path: str, rendered_path: str, prospect_id: str,
         loop=0,
         optimize=False,
     )
-    logger.info(f"Cinematic GIF saved: {out_path} ({len(frames)} frames, {sum(durations)//1000}s)")
+    logger.info(f"Cinematic GIF saved: {out_path} ({len(frames)} frames, ~{sum(durations)//1000}s)")
     return out_path
 
 
@@ -406,7 +394,7 @@ async def render_pool(prospect_id: str, satellite_path: str, pool_zone: dict) ->
 
 
     # Generate reveal GIF (satellite → pool animation)
-    gif_path = create_reveal_gif(satellite_path, out_path, prospect_id, pool_zone)
+    gif_path = await create_reveal_gif(satellite_path, out_path, prospect_id, pool_zone)
     logger.info(f"GIF generated: {gif_path}")
     return out_path
 
