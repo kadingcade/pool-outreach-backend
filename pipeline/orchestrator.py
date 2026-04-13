@@ -95,7 +95,7 @@ async def run_pipeline(
         )
         await update_prospect(satellite_image_path=f"/static/images/{prospect_id}_satellite.jpg")
 
-        zone_info = lot_scanner.identify_pool_zone(satellite_path, enriched.get("lot_sqft", 15000))
+        zone_info = await lot_scanner.identify_pool_zone(satellite_path, address=prospect.address, lot_sqft=enriched.get("lot_sqft", 15000))
 
         await emit(
             "lot_scanned",
