@@ -145,23 +145,21 @@ async def _replicate_construction_video(image_path: str) -> list:
         tmp_path = tmp.name
 
     try:
-        with tempfile.TemporaryDirectory() as frame_dir:
-            result = subprocess.run(
-                [
-                    "ffmpeg", "-y", "-i", tmp_path,
-                    "-vf", "fps=10,scale=800:600:force_original_aspect_ratio=decrease,"
-                           "pad=800:600:(ow-iw)/2:(oh-ih)/2:black",
-                    "-q:v", "2",
-                    os.path.join(frame_dir, "frame_%04d.jpg"),
-                ],
-                capture_output=True, timeout=60,
-            )
-            if result.returncode == 0:
-                frame_files = sorted(glob.glob(os.path.join(frame_dir, "frame_*.jpg")))
-                frames = [Image.open(f).convert("RGB") for f in frame_files]
-                logger.info(f"Extracted {len(frames)} frames from Replicate video")
-            else:
-                logger.warning(f"ffmpeg frame extraction failed: {result.stderr.decode()[:200]}")
+        import av
+        container = av.open(tmp_path)
+        video_stream = container.streams.video[0]
+        fps = float(video_stream.average_rate) if video_stream.average_rate else 24.0
+        sample_every = max(1, int(fps / 10))
+        frame_count = 0
+        for packet in container.demux(video_stream):
+            for frame in packet.decode():
+                if frame_count % sample_every == 0:
+                    img = frame.to_image().convert("RGB")
+                    img = img.resize((800, 600), Image.LANCZOS)
+                    frames.append(img)
+                frame_count += 1
+        container.close()
+        logger.info(f"Extracted {len(frames)} frames from Replicate video via PyAV")
     except Exception as e:
         logger.warning(f"Frame extraction error: {e}")
     finally:
