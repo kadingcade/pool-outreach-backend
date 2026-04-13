@@ -17,6 +17,9 @@ from PIL import Image, ImageDraw, ImageFilter
 import numpy as np
 
 import config
+import logging
+
+logger = logging.getLogger(__name__)
 
 POOL_PROMPT = (
     "photorealistic luxury swimming pool with white travertine pool deck and coping stones, "
@@ -40,6 +43,54 @@ def _build_mask(img: Image.Image, pool_zone: dict, pad: int = 10) -> Image.Image
     ImageDraw.Draw(mask).rectangle([x1 - pad, y1 - pad, x2 + pad, y2 + pad], fill="white")
     return mask
 
+
+
+
+def create_reveal_gif(satellite_path: str, rendered_path: str, prospect_id: str) -> str:
+    """Create an animated GIF revealing the pool on the satellite image.
+    
+    Frames: hold satellite → crossfade → hold rendered pool.
+    Returns path to the saved .gif file.
+    """
+    out_path = os.path.join(config.IMAGES_DIR, f"{prospect_id}_reveal.gif")
+    try:
+        SIZE = (800, 600)
+        sat = Image.open(satellite_path).convert("RGBA").resize(SIZE, Image.LANCZOS)
+        ren = Image.open(rendered_path).convert("RGBA").resize(SIZE, Image.LANCZOS)
+
+        frames = []
+        durations = []
+
+        # Hold on satellite (before) — 10 frames × 120ms = 1.2s
+        for _ in range(10):
+            frames.append(sat.convert("RGB"))
+            durations.append(120)
+
+        # Crossfade satellite → rendered — 20 frames × 80ms = 1.6s
+        for i in range(20):
+            alpha = i / 19.0
+            blended = Image.blend(sat, ren, alpha)
+            frames.append(blended.convert("RGB"))
+            durations.append(80)
+
+        # Hold on rendered (after) — 10 frames × 120ms = 1.2s
+        for _ in range(10):
+            frames.append(ren.convert("RGB"))
+            durations.append(120)
+
+        frames[0].save(
+            out_path,
+            format="GIF",
+            save_all=True,
+            append_images=frames[1:],
+            duration=durations,
+            loop=0,
+            optimize=False,
+        )
+        logger.info(f"Reveal GIF saved: {out_path}")
+    except Exception as e:
+        logger.warning(f"GIF creation failed ({e}), skipping")
+    return out_path
 
 async def render_pool(prospect_id: str, satellite_path: str, pool_zone: dict) -> str:
     out_path = os.path.join(config.IMAGES_DIR, f"{prospect_id}_rendered.jpg")
@@ -68,6 +119,10 @@ async def render_pool(prospect_id: str, satellite_path: str, pool_zone: dict) ->
             logger.warning(f"AI render failed ({e}), falling back to demo render")
             await _demo_render(satellite_path, out_path, pool_zone)
 
+
+    # Generate reveal GIF (satellite → pool animation)
+    gif_path = create_reveal_gif(satellite_path, out_path, prospect_id)
+    logger.info(f"GIF generated: {gif_path}")
     return out_path
 
 
