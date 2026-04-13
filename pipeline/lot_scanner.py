@@ -1,11 +1,12 @@
 """
 Lot scanner — downloads satellite imagery and identifies the pool-ready zone.
 
-Real mode: fetches from Google Maps Static API.
-Demo mode: downloads a sample aerial image and marks it up.
+Real mode: fetches from Google Maps Static API (falls back to demo if API unavailable).
+Demo mode: generates a synthetic aerial image using PIL.
 """
 import os
 import asyncio
+import logging
 import httpx
 import numpy as np
 from PIL import Image, ImageDraw
@@ -13,26 +14,21 @@ import io
 
 import config
 
-# Sample aerial house images (public domain / CC0) for demo mode
-DEMO_AERIAL_URLS = [
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/0/0c/Aerial_view_of_suburban_house_with_pool.jpg/640px-Aerial_view_of_suburban_house_with_pool.jpg",
-]
-
-# We'll generate a synthetic aerial for demo if downloads fail
-SYNTHETIC_FALLBACK = True
+logger = logging.getLogger(__name__)
 
 
 async def get_satellite_image(prospect_id: str, lat: float, lng: float, address: str) -> str:
-    """
-    Download satellite imagery for the property.
-    Returns local file path.
-    """
+    """Download satellite imagery for the property. Returns local file path."""
     out_path = os.path.join(config.IMAGES_DIR, f"{prospect_id}_satellite.jpg")
 
     if config.DEMO_MODE or not config.GOOGLE_MAPS_API_KEY:
         await _generate_demo_satellite(out_path, address)
     else:
-        await _fetch_google_satellite(out_path, lat, lng)
+        try:
+            await _fetch_google_satellite(out_path, lat, lng)
+        except Exception as e:
+            logger.warning(f"Google Maps API failed ({e}), falling back to demo satellite")
+            await _generate_demo_satellite(out_path, address)
 
     return out_path
 
@@ -50,83 +46,90 @@ async def _fetch_google_satellite(out_path: str, lat: float, lng: float):
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(url, params=params)
         resp.raise_for_status()
+        # Google Maps returns a 200 with an error image if the key is wrong —
+        # check content type to make sure we got a real image
+        content_type = resp.headers.get("content-type", "")
+        if "image" not in content_type:
+            raise ValueError(f"Maps API returned non-image content: {content_type}")
         with open(out_path, "wb") as f:
             f.write(resp.content)
 
 
 async def _generate_demo_satellite(out_path: str, address: str):
     """
-    Generate a convincing synthetic satellite-style aerial image for demo.
-    Creates a top-down view with house footprint, yard, trees, driveway.
+    Generate a convincing synthetic satellite-style aerial image using PIL.
+    No API required — used for demo and as fallback.
     """
-    await asyncio.sleep(0.5)  # Simulate API latency
+    await asyncio.sleep(0.8)
 
     W, H = 640, 480
-    img = Image.new("RGB", (W, H), (45, 75, 40))  # dark grass base
+    img = Image.new("RGB", (W, H), (85, 107, 47))  # grass green base
+
+    # Add grass texture noise
+    rng = np.random.default_rng(abs(hash(address)) % (2**32))
+    noise = rng.integers(0, 25, (H, W, 3), dtype=np.uint8)
+    grass = np.array(img) + noise - 12
+    grass = np.clip(grass, 0, 255).astype(np.uint8)
+    img = Image.fromarray(grass)
+
     draw = ImageDraw.Draw(img)
 
-    # Add grass texture variation
-    rng = np.random.default_rng(hash(address) % (2**32))
-    noise = rng.integers(0, 20, (H, W, 3), dtype=np.uint8)
-    grass_array = np.array(img, dtype=np.uint8)
-    grass_array = np.clip(grass_array.astype(int) + noise - 10, 0, 255).astype(np.uint8)
-    img = Image.fromarray(grass_array)
-    draw = ImageDraw.Draw(img)
+    # House footprint (upper-center)
+    house_x1, house_y1 = W // 2 - 80, H // 4 - 40
+    house_x2, house_y2 = W // 2 + 80, H // 4 + 60
+    draw.rectangle([house_x1, house_y1, house_x2, house_y2], fill=(200, 190, 175))
+    # Roof ridge line
+    draw.line([(W // 2, house_y1), (W // 2, house_y2)], fill=(160, 150, 135), width=3)
 
-    # Driveway (gray)
-    draw.rectangle([260, 0, 310, 160], fill=(120, 115, 108))
-    draw.rectangle([260, 140, 400, 175], fill=(115, 110, 103))
+    # Driveway
+    drive_x = W // 2 + 60
+    draw.polygon([
+        (drive_x, house_y2),
+        (drive_x + 30, house_y2),
+        (drive_x + 50, H - 20),
+        (drive_x - 20, H - 20),
+    ], fill=(140, 135, 120))
 
-    # House footprint (white/light gray roof)
-    draw.rectangle([180, 150, 460, 320], fill=(230, 225, 220))
-    # Roof ridge lines
-    draw.line([(320, 150), (320, 320)], fill=(200, 195, 190), width=3)
-    draw.line([(180, 235), (460, 235)], fill=(210, 205, 200), width=2)
+    # Trees (circles)
+    for tx, ty, tr in [(120, 100, 28), (500, 80, 22), (80, 300, 24), (560, 320, 20)]:
+        draw.ellipse([tx - tr, ty - tr, tx + tr, ty + tr], fill=(34, 85, 34))
+        draw.ellipse([tx - tr + 5, ty - tr + 5, tx + tr - 5, ty + tr - 5],
+                     fill=(45, 100, 45))
 
-    # Pool deck area (concrete — lighter green/gray, backyard)
-    draw.rectangle([200, 340, 440, 460], fill=(55, 90, 50))
+    # Fence line (backyard boundary)
+    draw.line([(house_x1, house_y2 + 10), (house_x1, H - 30)], fill=(160, 140, 100), width=2)
+    draw.line([(house_x2, house_y2 + 10), (house_x2, H - 30)], fill=(160, 140, 100), width=2)
+    draw.line([(house_x1, H - 30), (house_x2, H - 30)], fill=(160, 140, 100), width=2)
 
-    # Trees around perimeter
-    tree_positions = [(60, 80), (560, 60), (80, 350), (570, 380), (100, 430), (550, 200)]
-    for tx, ty in tree_positions:
-        draw.ellipse([tx-25, ty-25, tx+25, ty+25], fill=(20, 55, 20))
-        draw.ellipse([tx-18, ty-18, tx+18, ty+18], fill=(30, 70, 25))
-
-    # Street at top
-    draw.rectangle([0, 0, W, 15], fill=(80, 78, 75))
-    draw.line([(0, 7), (W, 7)], fill=(200, 195, 150), width=1)
-
-    # Add slight vignette / shadow
     img.save(out_path, "JPEG", quality=92)
 
 
-def identify_pool_zone(image_path: str, lot_sqft: int) -> dict:
+def identify_pool_zone(satellite_path: str, lot_sqft: int = 15000) -> dict:
     """
-    Analyze the satellite image to find the best pool placement zone.
-    Returns mask coordinates and zone info.
+    Identify the best zone in the backyard for a pool.
+    Returns pool zone coordinates and size estimates.
     """
-    img = Image.open(image_path)
-    W, H = img.size
+    try:
+        img = Image.open(satellite_path)
+        W, H = img.size
+    except Exception:
+        W, H = 640, 480
 
-    # The backyard is typically in the lower portion of the aerial image
-    # We find the largest contiguous "yard" area (green pixels, lower half)
-    backyard_y_start = int(H * 0.6)
+    # Backyard = lower 40% of image
+    backyard_y_start = int(H * 0.55)
     backyard_center_x = W // 2
     backyard_center_y = int(H * 0.78)
 
-    # Pool dimensions: typical 15x30 ft pool, scale to image
-    # Assume 640px wide = ~80ft, so 1px ≈ 0.125ft
+    # Pool ~15x30 ft; image ~640px wide = ~80ft -> 1px ~ 0.125ft
     scale = W / 80.0
-    pool_w = int(15 * scale)   # ~15ft wide
-    pool_h = int(30 * scale)   # ~30ft long
+    pool_w = int(15 * scale)
+    pool_h = int(30 * scale)
 
-    # Center pool in backyard
     x1 = backyard_center_x - pool_w // 2
     y1 = backyard_center_y - pool_h // 2
     x2 = x1 + pool_w
     y2 = y1 + pool_h
 
-    # Clamp to image bounds with margin
     margin = 20
     x1 = max(margin, min(x1, W - pool_w - margin))
     y1 = max(backyard_y_start, min(y1, H - pool_h - margin))
@@ -138,7 +141,7 @@ def identify_pool_zone(image_path: str, lot_sqft: int) -> dict:
     return {
         "pool_zone": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
         "pool_sqft": pool_sqft,
-        "backyard_sqft": lot_sqft - 3000,  # approx (minus house footprint)
+        "backyard_sqft": lot_sqft - 3000,
         "setbacks_clear": True,
         "lot_sqft": lot_sqft,
     }
