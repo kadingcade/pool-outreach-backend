@@ -84,6 +84,9 @@ async def _replicate_construction_video(image_path: str) -> list:
     """
     import glob
     import replicate
+    import httpx
+    import subprocess
+    import tempfile
 
     prompt = (
         "Continue animating this exact aerial image. Do not change the house, the roof, the trees, "
