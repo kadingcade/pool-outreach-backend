@@ -46,37 +46,157 @@ def _build_mask(img: Image.Image, pool_zone: dict, pad: int = 10) -> Image.Image
 
 
 
-def create_reveal_gif(satellite_path: str, rendered_path: str, prospect_id: str) -> str:
-    """Create an animated GIF revealing the pool on the satellite image.
-    
-    Frames: hold satellite → crossfade → hold rendered pool.
-    Returns path to the saved .gif file.
+def create_reveal_gif(satellite_path: str, rendered_path: str, prospect_id: str, pool_zone: dict = None) -> str:
+    """
+    Multi-stage pool construction animation on the real satellite image:
+      1. Hold satellite
+      2. Pool outline draws in (yellow, clockwise)
+      3. Excavation fills brown (dirt)
+      4. Water rises from the bottom (blue gradient)
+      5. Crossfade to AI render
+      6. Hold final render
+    pool_zone: {"x1","y1","x2","y2"} in pixels of the 640x480 satellite.
     """
     out_path = os.path.join(config.IMAGES_DIR, f"{prospect_id}_reveal.gif")
     try:
-        SIZE = (800, 600)
-        sat = Image.open(satellite_path).convert("RGBA").resize(SIZE, Image.LANCZOS)
-        ren = Image.open(rendered_path).convert("RGBA").resize(SIZE, Image.LANCZOS)
+        GIF_W, GIF_H = 800, 600
+        SAT_W, SAT_H = 640, 480  # original satellite size
+        sx = GIF_W / SAT_W
+        sy = GIF_H / SAT_H
+
+        sat = Image.open(satellite_path).convert("RGB").resize((GIF_W, GIF_H), Image.LANCZOS)
+        ren = Image.open(rendered_path).convert("RGB").resize((GIF_W, GIF_H), Image.LANCZOS)
+
+        # Scale pool_zone to GIF dimensions
+        if pool_zone and all(k in pool_zone for k in ("x1", "y1", "x2", "y2")):
+            rx1 = int(pool_zone["x1"] * sx)
+            ry1 = int(pool_zone["y1"] * sy)
+            rx2 = int(pool_zone["x2"] * sx)
+            ry2 = int(pool_zone["y2"] * sy)
+        else:
+            # Sensible default: centre-bottom of frame
+            rx1, ry1, rx2, ry2 = 240, 300, 560, 460
+
+        rw = rx2 - rx1
+        rh = ry2 - ry1
 
         frames = []
         durations = []
 
-        # Hold on satellite (before) — 10 frames × 120ms = 1.2s
-        for _ in range(10):
-            frames.append(sat.convert("RGB"))
-            durations.append(120)
+        def overlay_frame(base_rgb, draw_fn, duration_ms):
+            """Composite an RGBA overlay onto an RGB base, append to frames."""
+            ov = Image.new("RGBA", (GIF_W, GIF_H), (0, 0, 0, 0))
+            draw_fn(ImageDraw.Draw(ov, "RGBA"))
+            composited = Image.alpha_composite(base_rgb.convert("RGBA"), ov).convert("RGB")
+            frames.append(composited)
+            durations.append(duration_ms)
 
-        # Crossfade satellite → rendered — 20 frames × 80ms = 1.6s
-        for i in range(20):
-            alpha = i / 19.0
-            blended = Image.blend(sat, ren, alpha)
-            frames.append(blended.convert("RGB"))
-            durations.append(80)
+        def plain_frame(img_rgb, duration_ms):
+            frames.append(img_rgb.copy())
+            durations.append(duration_ms)
 
-        # Hold on rendered (after) — 10 frames × 120ms = 1.2s
+        # Stage 1: Hold satellite (8 frames x 100ms = 0.8s)
+        for _ in range(8):
+            plain_frame(sat, 100)
+
+        # Stage 2: Pool outline draws clockwise (12 frames x 60ms)
+        YELLOW = (255, 220, 50, 240)
+        perimeter = 2 * (rw + rh)
+        for i in range(12):
+            t = (i + 1) / 12.0
+            drawn = int(perimeter * t)
+            def draw_outline(d, drawn=drawn):
+                lw = 3
+                # Top
+                top = min(drawn, rw)
+                if top > 0: d.line([(rx1, ry1), (rx1 + top, ry1)], fill=YELLOW, width=lw)
+                drawn -= top
+                # Right
+                right = min(max(drawn, 0), rh)
+                if right > 0: d.line([(rx2, ry1), (rx2, ry1 + right)], fill=YELLOW, width=lw)
+                drawn -= right
+                # Bottom
+                bot = min(max(drawn, 0), rw)
+                if bot > 0: d.line([(rx2, ry2), (rx2 - bot, ry2)], fill=YELLOW, width=lw)
+                drawn -= bot
+                # Left
+                left = min(max(drawn, 0), rh)
+                if left > 0: d.line([(rx1, ry2), (rx1, ry2 - left)], fill=YELLOW, width=lw)
+            overlay_frame(sat, draw_outline, 60)
+
+        # Stage 3: Hold with full outline (4 frames x 120ms)
+        def full_outline(d):
+            d.rectangle([(rx1, ry1), (rx2, ry2)], outline=YELLOW, width=3)
+        for _ in range(4):
+            overlay_frame(sat, full_outline, 120)
+
+        # Stage 4: Excavation — brown fill animates top→bottom (10 frames x 80ms)
+        DIRT   = (92, 58, 26, 240)
+        DIRT_L = (120, 85, 45, 200)
+        for i in range(10):
+            t = (i + 1) / 10.0
+            fill_h = int(rh * t)
+            def draw_dig(d, fill_h=fill_h):
+                if fill_h > 0:
+                    d.rectangle([(rx1 + 1, ry1), (rx2 - 1, ry1 + fill_h)], fill=DIRT)
+                    for row in range(0, fill_h, 10):
+                        d.line([(rx1 + 4, ry1 + row), (rx2 - 4, ry1 + row)], fill=DIRT_L, width=1)
+                d.rectangle([(rx1, ry1), (rx2, ry2)], outline=YELLOW, width=2)
+            overlay_frame(sat, draw_dig, 80)
+
+        # Build excavated base (satellite + full dirt rectangle)
+        dug_ov = Image.new("RGBA", (GIF_W, GIF_H), (0, 0, 0, 0))
+        dug_d = ImageDraw.Draw(dug_ov, "RGBA")
+        dug_d.rectangle([(rx1 + 1, ry1), (rx2 - 1, ry2)], fill=DIRT)
+        for row in range(0, rh, 10):
+            dug_d.line([(rx1 + 4, ry1 + row), (rx2 - 4, ry1 + row)], fill=DIRT_L, width=1)
+        dug_base = Image.alpha_composite(sat.convert("RGBA"), dug_ov).convert("RGB")
+
+        # Stage 5: Water rises bottom→top (18 frames x 70ms = 1.26s)
+        W_DEEP    = (0, 100, 185)
+        W_SHALLOW = (55, 195, 225)
+        for i in range(18):
+            t = (i + 1) / 18.0
+            wh = int(rh * t)
+            def draw_water(d, wh=wh):
+                if wh > 0:
+                    wy = ry2 - wh
+                    for row in range(wh):
+                        ratio = row / max(wh, 1)
+                        r = int(W_DEEP[0] + ratio * (W_SHALLOW[0] - W_DEEP[0]))
+                        g = int(W_DEEP[1] + ratio * (W_SHALLOW[1] - W_DEEP[1]))
+                        b = int(W_DEEP[2] + ratio * (W_SHALLOW[2] - W_DEEP[2]))
+                        d.line([(rx1 + 1, wy + row), (rx2 - 1, wy + row)], fill=(r, g, b, 225))
+                    # Shimmer line at water surface
+                    d.line([(rx1 + 2, wy), (rx2 - 2, wy)], fill=(200, 245, 255, 200), width=2)
+                d.rectangle([(rx1, ry1), (rx2, ry2)], outline=(200, 245, 255, 180), width=2)
+            overlay_frame(dug_base, draw_water, 70)
+
+        # Build full-water base
+        water_ov = Image.new("RGBA", (GIF_W, GIF_H), (0, 0, 0, 0))
+        water_d = ImageDraw.Draw(water_ov, "RGBA")
+        for row in range(rh):
+            ratio = row / max(rh, 1)
+            r = int(W_DEEP[0] + ratio * (W_SHALLOW[0] - W_DEEP[0]))
+            g = int(W_DEEP[1] + ratio * (W_SHALLOW[1] - W_DEEP[1]))
+            b = int(W_DEEP[2] + ratio * (W_SHALLOW[2] - W_DEEP[2]))
+            water_d.line([(rx1 + 1, ry1 + row), (rx2 - 1, ry1 + row)], fill=(r, g, b, 225))
+        water_d.rectangle([(rx1, ry1), (rx2, ry2)], outline=(200, 245, 255, 180), width=2)
+        water_base = Image.alpha_composite(dug_base.convert("RGBA"), water_ov).convert("RGB")
+
+        # Stage 6: Hold filled pool (5 frames x 150ms = 0.75s)
+        for _ in range(5):
+            plain_frame(water_base, 150)
+
+        # Stage 7: Crossfade water_base → AI render (16 frames x 60ms = 0.96s)
+        for i in range(16):
+            alpha = (i + 1) / 16.0
+            blended = Image.blend(water_base, ren, alpha)
+            plain_frame(blended, 60)
+
+        # Stage 8: Hold AI render (10 frames x 120ms = 1.2s)
         for _ in range(10):
-            frames.append(ren.convert("RGB"))
-            durations.append(120)
+            plain_frame(ren, 120)
 
         frames[0].save(
             out_path,
@@ -91,7 +211,6 @@ def create_reveal_gif(satellite_path: str, rendered_path: str, prospect_id: str)
     except Exception as e:
         logger.warning(f"GIF creation failed ({e}), skipping")
     return out_path
-
 async def render_pool(prospect_id: str, satellite_path: str, pool_zone: dict) -> str:
     out_path = os.path.join(config.IMAGES_DIR, f"{prospect_id}_rendered.jpg")
     provider = config.RENDER_PROVIDER.lower()
@@ -121,7 +240,7 @@ async def render_pool(prospect_id: str, satellite_path: str, pool_zone: dict) ->
 
 
     # Generate reveal GIF (satellite → pool animation)
-    gif_path = create_reveal_gif(satellite_path, out_path, prospect_id)
+    gif_path = create_reveal_gif(satellite_path, out_path, prospect_id, pool_zone)
     logger.info(f"GIF generated: {gif_path}")
     return out_path
 
