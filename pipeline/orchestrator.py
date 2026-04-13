@@ -167,6 +167,7 @@ async def run_pipeline(
             city=enriched.get("city", ""),
             state=enriched.get("state", ""),
             rendered_image_path=rendered_path,
+            satellite_image_path=satellite_path,
             pool_cost=econ["pool_cost"],
             value_lift=econ["value_lift"],
             microsite_url=prospect_id,
