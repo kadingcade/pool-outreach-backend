@@ -89,26 +89,51 @@ async def _replicate_construction_video(image_path: str) -> list:
     import tempfile
 
     prompt = (
-        "Continue animating this exact aerial image. Do not change the house, the roof, the trees, "
-        "the lawn, the fences, or any part of the existing property shown in the image. "
-        "Keep every element of the scene identical to the input image — only add and animate a swimming "
-        "pool being constructed in the backyard area of this specific property. "
-        "Time-lapse construction sequence building on top of this image: a rectangular pit is excavated "
-        "in the backyard, revealing dark brown clay soil with sharply defined edges. A compact excavator "
-        "removes earth and piles displaced soil to one side. Construction workers spray white-gray gunite "
-        "concrete along the pit walls and floor forming a clean pool shell, with a steel rebar grid "
-        "briefly visible before concrete sets. Light gray concrete deck slabs form around all four sides. "
-        "White coping tiles are placed along the perimeter edge. Crystal-clear water slowly rises from "
-        "the bottom — first shallow aqua at the base, then bright turquoise halfway, then full cerulean "
-        "blue sparkling water catching sunlight. Two white lounge chairs appear on the finished pool deck. "
-        "The final frame shows this exact same property with a completed luxury rectangular swimming pool "
-        "seamlessly integrated into the backyard, as if it was always there."
+        "This is an aerial satellite photograph of a real residential property. "
+        "A bright white rectangular border has been drawn on the image marking the exact backyard area "
+        "where a swimming pool must be constructed. Do not move, resize, or ignore this white outline — "
+        "it defines the precise pool footprint. Do not change anything outside the white border: "
+        "keep the house roof, walls, driveway, trees, fences, neighboring properties, and all "
+        "surrounding landscaping completely identical to the input image throughout the entire video. "
+        "Animate a hyper-realistic aerial time-lapse construction sequence building a luxury swimming pool "
+        "strictly within the white rectangular border, as seen from directly overhead:\n"
+        "PHASE 1 — EXCAVATION (frames 1-20): A bright yellow CAT excavator enters the white-bordered area "
+        "from one corner. Its bucket tears into the grass, exposing dark brown clay soil beneath. "
+        "The machine makes repeated passes, carving a clean rectangular pit with sharply defined vertical walls "
+        "and a flat bottom exactly matching the white border dimensions. Displaced soil is piled in mounds "
+        "just outside the border. Tire tracks and mud streaks are visible on the surrounding grass. "
+        "A second worker in a hard hat and orange vest stands at the pit edge directing the operator.\n"
+        "PHASE 2 — STEEL REBAR GRID (frames 21-35): Four workers carry heavy steel rebar rods into the pit. "
+        "They lay a precise grid pattern — horizontal and vertical steel bars crossing at regular intervals "
+        "across the entire floor and partway up all four walls. Steel wire ties connect each intersection. "
+        "The raw steel glints silver-gray against the dark brown soil.\n"
+        "PHASE 3 — GUNITE CONCRETE SHELL (frames 36-50): A thick gray hose snakes into the pit. "
+        "A worker in full protective gear sprays high-pressure gunite concrete — a rough gray mixture — "
+        "coating all four walls and the floor in a thick, textured layer. The rebar disappears beneath "
+        "the concrete. The shell is smooth on the inside face and rough on the outside. "
+        "The pit is now a sealed gray concrete basin.\n"
+        "PHASE 4 — COPING AND DECK (frames 51-65): Workers haul pale cream-colored travertine stone slabs "
+        "and lay them flat around all four sides of the pool shell, forming a wide surrounding deck. "
+        "White coping stones are mortared along the top rim of the pool shell, creating a clean finished edge. "
+        "A small concrete mixer truck backs up to pour the deck foundation. The deck surface is power-washed "
+        "to a clean light-gray finish. A short retaining wall of matching stone borders the outer deck edge.\n"
+        "PHASE 5 — WATER FILL (frames 66-81): A garden hose is draped over the coping and water begins "
+        "flowing in. The pool fills from the bottom — first a thin shimmering aqua layer coats the floor, "
+        "then the water climbs steadily, turning bright turquoise at mid-depth, then deep sparkling cerulean "
+        "blue as it reaches the coping. Sunlight refracts in rippling caustic patterns on the pool floor. "
+        "Two cushioned white lounge chairs with side tables appear on the finished travertine deck. "
+        "A stainless steel pool ladder gleams at one end. The completed pool is seamlessly integrated into "
+        "the property — exactly where the white border was — as if it was always there."
     )
     negative_prompt = (
-        "different house, different property, different location, new scene, new background, "
-        "change the house, move the trees, alter the landscape, replace the roof, "
-        "cartoon, illustration, blur, watermark, text overlay, CGI look, unrealistic, "
-        "low quality, glitch, distortion, overexposed, night, rain, snow, dead grass, deformed pool"
+        "different house, different property, moved trees, altered roofline, new background, different location, "
+        "cartoon, CGI, illustration, anime, painting, sketch, watermark, text, logo, subtitles, "
+        "blurry, low quality, grainy, overexposed, underexposed, washed out, "
+        "night scene, rain, snow, fog, winter, dead grass, brown lawn, "
+        "indoor pool, above-ground pool, oval pool, kidney-shaped pool, "
+        "people swimming, parties, crowded, toys in pool, "
+        "distorted geometry, melting structures, impossible architecture, deformed excavator, "
+        "floating objects, glitch artifacts, strobing, temporal inconsistency"
     )
     logger.info("Calling Replicate Wan 2.1 for construction video...")
     with open(image_path, "rb") as img_file:
@@ -237,6 +262,26 @@ async def create_reveal_gif(satellite_path: str, rendered_path: str, prospect_id
         add(cropped, 60)
 
     zoomed = sat.crop(crop_end).resize((GIF_W, GIF_H), Image.LANCZOS)
+
+    # ── Draw white outline of pool zone on zoomed frame (Wan 2.1 visual anchor) ──
+    crop_w = crop_end[2] - crop_end[0]
+    crop_h = crop_end[3] - crop_end[1]
+    if crop_w > 0 and crop_h > 0:
+        scale_x_z = GIF_W / crop_w
+        scale_y_z = GIF_H / crop_h
+        zpx1 = int((px1 - crop_end[0]) * scale_x_z)
+        zpy1 = int((py1 - crop_end[1]) * scale_y_z)
+        zpx2 = int((px2 - crop_end[0]) * scale_x_z)
+        zpy2 = int((py2 - crop_end[1]) * scale_y_z)
+        # Clamp to frame bounds
+        zpx1, zpy1 = max(4, zpx1), max(4, zpy1)
+        zpx2, zpy2 = min(GIF_W - 4, zpx2), min(GIF_H - 4, zpy2)
+        zoomed_draw = ImageDraw.Draw(zoomed)
+        for offset in range(4):  # 4px thick outline
+            zoomed_draw.rectangle(
+                [zpx1 + offset, zpy1 + offset, zpx2 - offset, zpy2 - offset],
+                outline=(255, 255, 255)
+            )
 
     # ── Stage 3: Camera tilt to 45° (QUAD warp) ──────────────────────────────
     n_tilt = 12
