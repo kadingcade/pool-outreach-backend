@@ -248,21 +248,12 @@ async def create_reveal_gif(satellite_path: str, rendered_path: str, prospect_id
     for _ in range(6):
         add(sat, 200)
 
-    # ── Stage 2: Drone zoom (Ken Burns) ──────────────────────────────────────
+    # ── Stage 2: Zoom removed — jump straight to pool zone crop for tilt ──────
     pad = max(pool_w, pool_h) * 1.4
     crop_end = (
         max(0, cx - pad), max(0, cy - pad),
         min(GIF_W, cx + pad), min(GIF_H, cy + pad),
     )
-    n_zoom = 14
-    for i in range(n_zoom):
-        t = (i / (n_zoom - 1)) ** 2
-        x0 = t * crop_end[0]
-        y0 = t * crop_end[1]
-        x1c = GIF_W + t * (crop_end[2] - GIF_W)
-        y1c = GIF_H + t * (crop_end[3] - GIF_H)
-        cropped = sat.crop((x0, y0, x1c, y1c)).resize((GIF_W, GIF_H), Image.LANCZOS)
-        add(cropped, 60)
 
     zoomed = sat.crop(crop_end).resize((GIF_W, GIF_H), Image.LANCZOS)
 
