@@ -137,17 +137,20 @@ async def _replicate_construction_video(image_path: str) -> list:
     )
     logger.info("Calling Replicate Wan 2.1 for construction video...")
     with open(image_path, "rb") as img_file:
-        output = await asyncio.to_thread(
-            replicate.run,
-            "wavespeedai/wan-2.1-i2v-480p",
-            input={
-                "image": img_file,
-                "prompt": prompt,
-                "negative_prompt": negative_prompt,
-                "num_frames": 81,
-                "guidance_scale": 7.5,
-                "num_inference_steps": 30,
-            },
+        output = await asyncio.wait_for(
+            asyncio.to_thread(
+                replicate.run,
+                "wavespeedai/wan-2.1-i2v-480p",
+                input={
+                    "image": img_file,
+                    "prompt": prompt,
+                    "negative_prompt": negative_prompt,
+                    "num_frames": 81,
+                    "guidance_scale": 7.5,
+                    "num_inference_steps": 30,
+                },
+            ),
+            timeout=300,
         )
 
     # output may be a URL string or FileOutput object
@@ -310,6 +313,8 @@ async def create_reveal_gif(satellite_path: str, rendered_path: str, prospect_id
                 os.unlink(tilted_input_path)
             except Exception:
                 pass
+        except asyncio.TimeoutError:
+            logger.warning("Replicate Wan 2.1 timed out after 5 min, using PIL fallback")
         except Exception as e:
             logger.warning(f"Replicate construction video failed ({e}), using PIL fallback")
             construction_frames = []
